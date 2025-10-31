@@ -1,57 +1,59 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import requests
+from openai import OpenAI
 import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# Baseten API configuration
-BASETEN_API_KEY = os.environ.get('BASETEN_API_KEY')
-BASETEN_MODEL_ID = "q6on32g"  # DeepSeek-V3 model ID
-BASETEN_API_URL = f"https://model-{BASETEN_MODEL_ID}.api.baseten.co/production/predict"
+# Initialize DeepSeek client
+client = OpenAI(
+    api_key=os.environ.get("DEEPSEEK_API_KEY"),
+    base_url="https://api.deepseek.com"
+)
+
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Giuliana AI Concierge",
+        "model": "deepseek-chat",
+        "version": "1.0"
+    })
 
 @app.route('/api/giuliana', methods=['POST'])
-def giuliana_chat():
+def giuliana():
     try:
-        data = request.json
+        data = request.get_json()
+        
+        if not data or 'messages' not in data:
+            return jsonify({"error": "Messages are required"}), 400
+        
         messages = data.get('messages', [])
         temperature = data.get('temperature', 0.8)
         max_tokens = data.get('max_tokens', 2000)
         
-        if not messages:
-            return jsonify({'error': 'No messages provided'}), 400
+        # Call DeepSeek API
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
         
-        # Call Baseten DeepSeek API
-        headers = {
-            'Authorization': f'Api-Key {BASETEN_API_KEY}',
-            'Content-Type': 'application/json'
-        }
+        return jsonify({
+            "response": response.choices[0].message.content,
+            "model": "deepseek-chat",
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens
+            }
+        })
         
-        payload = {
-            'messages': messages,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-            'stream': False
-        }
-        
-        response = requests.post(BASETEN_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        
-        result = response.json()
-        assistant_message = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-        
-        return jsonify({'response': assistant_message})
-        
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'API request failed: {str(e)}'}), 500
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy'}), 200
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
+    port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
