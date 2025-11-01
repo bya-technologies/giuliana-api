@@ -59,7 +59,53 @@ def giuliana():
         return jsonify({"error": f"API request failed: {str(e)}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
+# Image Generation endpoint
+@app.route('/api/generate-image', methods=['POST'])
+def generate_image():
+    try:
+        data = request.get_json()
+        
+        if not data or 'prompt' not in data:
+            return jsonify({"error": "Prompt is required"}), 400
+        
+        prompt = data.get('prompt')
+        baseten_api_key = os.environ.get('BASETEN_API_KEY')
+        
+        if not baseten_api_key:
+            return jsonify({"error": "Baseten API key not configured"}), 500
+        
+        # Call Baseten SDXL API
+        headers = {
+            "Authorization": f"Api-Key {baseten_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "prompt": prompt,
+            "negative_prompt": "blurry, low quality, distorted",
+            "width": 1024,
+            "height": 1024,
+            "num_inference_steps": 30
+        }
+        
+        response = requests.post(
+            "https://model-sdxl.api.baseten.co/production/predict",
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        return jsonify({
+            "url": result.get('output', {}).get('image_url'),
+            "status": "success"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__ == '__main__':
+
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
