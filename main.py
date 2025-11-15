@@ -1,13 +1,12 @@
 import os
-from typing import List, Dict, Any
+from typing import List
 
 from fastapi import FastAPI
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
 
-
 # ------------------------------
-# Hugging Face Setup
+# Hugging Face setup
 # ------------------------------
 
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -17,26 +16,26 @@ client = InferenceClient(
     api_key=HF_TOKEN,
 )
 
-# Models
-LEGAL_BERT_MODEL = "nlpaueb/legal-bert-base-uncased"       # clause prediction
-LEGAL_SUMMARY_MODEL = "legal-pegasus"                      # summarization model (replace with exact HF model ID)
-LEGAL_NER_MODEL = "en_legal_ner_trf"                       # NER model (replace with exact HF model ID)
+# Model IDs exactly as shown on Hugging Face
+LEGAL_BERT_MODEL = "nlpaueb/legal-bert-base-uncased"      # core legal BERT
+LEGAL_SUMMARY_MODEL = "nsi319/legal-pegasus"              # legal summarization
+LEGAL_NER_MODEL = "opennyaiorg/en_legal_ner_trf"          # legal NER
 
 
 # ------------------------------
-# FastAPI App
+# FastAPI app
 # ------------------------------
 
 app = FastAPI(title="BYA Legal AI Enterprise API")
 
 
 # ------------------------------
-# Request / Response Models
+# Pydantic models
 # ------------------------------
 
 class MaskRequest(BaseModel):
-    text: str
-    top_k: int = 5
+    text: str               # sentence containing [MASK]
+    top_k: int = 5          # number of suggestions
 
 
 class MaskResponseItem(BaseModel):
@@ -47,8 +46,8 @@ class MaskResponseItem(BaseModel):
 
 
 class SummarizeRequest(BaseModel):
-    text: str
-    max_length: int = 256
+    text: str               # long legal text
+    max_length: int = 256   # max length of summary (tokens)
 
 
 class SummaryResponse(BaseModel):
@@ -56,7 +55,7 @@ class SummaryResponse(BaseModel):
 
 
 class NERRequest(BaseModel):
-    text: str
+    text: str               # legal text
 
 
 class NEREntity(BaseModel):
@@ -68,7 +67,7 @@ class NEREntity(BaseModel):
 
 
 class FullAnalysisRequest(BaseModel):
-    text: str
+    text: str               # full contract or document
 
 
 class FullAnalysisResponse(BaseModel):
@@ -78,7 +77,7 @@ class FullAnalysisResponse(BaseModel):
 
 
 # ------------------------------
-# API Endpoints
+# Routes
 # ------------------------------
 
 @app.get("/")
@@ -86,12 +85,16 @@ def root():
     return {"status": "ok", "service": "BYA Legal AI API"}
 
 
-# ---------- 1️⃣ Legal-BERT Fill Mask ----------
+# 1️⃣ Legal-BERT – fill mask
 @app.post("/legal/fill-mask", response_model=List[MaskResponseItem])
 def fill_mask(req: MaskRequest):
     """
     Predict missing legal terms in clauses using Legal-BERT.
-    Example: "This Agreement shall be [MASK] by both parties."
+    Example:
+    {
+      "text": "This Agreement shall be [MASK] by both parties.",
+      "top_k": 5
+    }
     """
     result = client.fill_mask(
         req.text,
@@ -101,7 +104,7 @@ def fill_mask(req: MaskRequest):
     return result
 
 
-# ---------- 2️⃣ Legal Summarization ----------
+# 2️⃣ Legal summarization – Pegasus
 @app.post("/legal/summarize", response_model=SummaryResponse)
 def summarize(req: SummarizeRequest):
     """
@@ -113,13 +116,14 @@ def summarize(req: SummarizeRequest):
         max_new_tokens=req.max_length,
     )
 
+    # HF may return list[dict] or dict
     if isinstance(result, list):
         result = result[0]
 
     return SummaryResponse(summary_text=result["summary_text"])
 
 
-# ---------- 3️⃣ Legal Named Entity Recognition ----------
+# 3️⃣ Legal NER – entities / clauses
 @app.post("/legal/entities", response_model=List[NEREntity])
 def extract_entities(req: NERRequest):
     """
@@ -137,23 +141,23 @@ def extract_entities(req: NERRequest):
             word=e["word"],
             score=e["score"],
             start=e["start"],
-            end=e["end"]
+            end=e["end"],
         )
         for e in entities
     ]
 
 
-# ---------- 4️⃣ Full Legal Analysis (All-in-One) ----------
+# 4️⃣ Full enterprise analysis – all in one
 @app.post("/legal/analyze", response_model=FullAnalysisResponse)
 def analyze(req: FullAnalysisRequest):
     """
-    Enterprise endpoint:
+    High-level enterprise endpoint:
     - Summarize document
     - Extract entities
-    - Suggest clause correction
+    - Generate generic clause suggestions
     """
 
-    # 1. Summary
+    # --- summary ---
     summary_result = client.summarization(
         req.text,
         model=LEGAL_SUMMARY_MODEL,
@@ -163,7 +167,7 @@ def analyze(req: FullAnalysisRequest):
         summary_result = summary_result[0]
     summary_text = summary_result["summary_text"]
 
-    # 2. Entities
+    # --- entities ---
     raw_entities = client.token_classification(
         req.text,
         model=LEGAL_NER_MODEL,
@@ -175,12 +179,12 @@ def analyze(req: FullAnalysisRequest):
             word=e["word"],
             score=e["score"],
             start=e["start"],
-            end=e["end"]
+            end=e["end"],
         )
         for e in raw_entities
     ]
 
-    # 3. Clause suggestions via Legal-BERT
+    # --- generic clause suggestions with Legal-BERT ---
     clause_prompt = (
         "This Agreement may be [MASK] by the Company at any time without cause."
     )
@@ -194,5 +198,5 @@ def analyze(req: FullAnalysisRequest):
     return FullAnalysisResponse(
         summary=summary_text,
         entities=entities,
-        clause_suggestions=clause_suggestions
+        clause_suggestions=clause_suggestions,
     )
