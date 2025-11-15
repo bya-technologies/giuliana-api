@@ -1,305 +1,52 @@
-import os
-from typing import List, Optional
-
-from fastapi import FastAPI
-from pydantic import BaseModel
-from huggingface_hub import InferenceClient
-
-# ------------------------------
-# Hugging Face setup
-# ------------------------------
-
-HF_TOKEN = os.environ.get("HF_TOKEN")
-
-client = InferenceClient(
-    provider="hf-inference",
-    api_key=HF_TOKEN,
-)
-
-# Core legal models
-LEGAL_BERT_MODEL = "nlpaueb/legal-bert-base-uncased"      # core legal BERT
-LEGAL_SUMMARY_MODEL = "nsi319/legal-pegasus"              # legal summarization
-LEGAL_NER_MODEL = "opennyaiorg/en_legal_ner_trf"          # legal NER
-
-# DeBERTa model for zero-shot contract / risk classification
-DEBERTA_ZS_MODEL = "microsoft/deberta-v3-base-mnli"
-
-# Default label sets
-DEFAULT_CONTRACT_LABELS = [
-    "Lease Agreement",
-    "Purchase Agreement",
-    "Listing Agreement",
-    "Property Management Agreement",
-    "Non-Disclosure Agreement",
-    "Service Agreement",
-    "Employment Contract",
-    "Other"
-]
-
-DEFAULT_RISK_LABELS = [
-    "Low risk",
-    "Medium risk",
-    "High risk"
-]
-
-# ------------------------------
-# FastAPI app
-# ------------------------------
-
-app = FastAPI(title="BYA Legal & Real Estate AI API")
-
-# ------------------------------
-# Pydantic models
-# ------------------------------
-
-class MaskRequest(BaseModel):
-    text: str               # sentence containing [MASK]
-    top_k: int = 5          # number of suggestions
-
-
-class MaskResponseItem(BaseModel):
-    sequence: str
-    score: float
-    token: int
-    token_str: str
-
-
-class SummarizeRequest(BaseModel):
-    text: str               # long legal text
-    max_length: int = 256   # max length of summary (tokens)
-
-
-class SummaryResponse(BaseModel):
-    summary_text: str
-
-
-class NERRequest(BaseModel):
-    text: str               # legal text
-
-
-class NEREntity(BaseModel):
-    entity_group: str
-    word: str
-    score: float
-    start: int
-    end: int
-
-
-class FullAnalysisRequest(BaseModel):
-    text: str               # full contract or document
-
-
-class FullAnalysisResponse(BaseModel):
-    summary: str
-    entities: List[NEREntity]
-    clause_suggestions: List[MaskResponseItem]
-
-
-# New: contract type classification
-class ContractTypeRequest(BaseModel):
+# 8️⃣ Multilingual Legal Domain Classification
+class DomainClassifyRequest(BaseModel):
     text: str
-    labels: Optional[List[str]] = None   # optional custom label set
+    labels: Optional[List[str]] = None
 
 
-class ContractTypeResponse(BaseModel):
+class DomainClassifyResponse(BaseModel):
     label: str
     score: float
     all_labels: List[str]
     all_scores: List[float]
 
 
-# New: real estate risk scoring
-class RiskScoreRequest(BaseModel):
-    text: str
+MULTILINGUAL_DEBERTA = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
 
 
-class RiskScoreResponse(BaseModel):
-    risk_label: str
-    score: float
-    all_labels: List[str]
-    all_scores: List[float]
-
-
-# ------------------------------
-# Routes
-# ------------------------------
-
-@app.get("/")
-def root():
-    return {"status": "ok", "service": "BYA Legal & Real Estate AI API"}
-
-
-# 1️⃣ Legal-BERT – fill mask
-@app.post("/legal/fill-mask", response_model=List[MaskResponseItem])
-def fill_mask(req: MaskRequest):
+@app.post("/legal/domain-classify", response_model=DomainClassifyResponse)
+def legal_domain_classify(req: DomainClassifyRequest):
     """
-    Predict missing legal terms in clauses using Legal-BERT.
-    Example:
-    {
-      "text": "This Agreement shall be [MASK] by both parties.",
-      "top_k": 5
-    }
+    Multilingual zero-shot classifier for legal text.
+    Detects if content relates to family, civil, contract, real estate, criminal law, etc.
+    Works with Arabic, French, English, Spanish, German...
     """
-    result = client.fill_mask(
-        req.text,
-        model=LEGAL_BERT_MODEL,
-        top_k=req.top_k,
-    )
-    return result
 
-
-# 2️⃣ Legal summarization – Pegasus
-@app.post("/legal/summarize", response_model=SummaryResponse)
-def summarize(req: SummarizeRequest):
-    """
-    Summarize long contracts or legal documents.
-    """
-    result = client.summarization(
-        req.text,
-        model=LEGAL_SUMMARY_MODEL,
-        max_new_tokens=req.max_length,
-    )
-
-    # HF may return list[dict] or dict
-    if isinstance(result, list):
-        result = result[0]
-
-    return SummaryResponse(summary_text=result["summary_text"])
-
-
-# 3️⃣ Legal NER – entities / clauses
-@app.post("/legal/entities", response_model=List[NEREntity])
-def extract_entities(req: NERRequest):
-    """
-    Extract legal entities: PARTY, DATE, MONEY, LAW, LOCATION, etc.
-    """
-    entities = client.token_classification(
-        req.text,
-        model=LEGAL_NER_MODEL,
-        aggregation_strategy="simple",
-    )
-
-    return [
-        NEREntity(
-            entity_group=e["entity_group"],
-            word=e["word"],
-            score=e["score"],
-            start=e["start"],
-            end=e["end"],
-        )
-        for e in entities
+    labels = req.labels or [
+        "Family law",
+        "Civil law",
+        "Contract law",
+        "Real estate law",
+        "Corporate law",
+        "Criminal law",
+        "Labor law",
+        "Immigration law"
     ]
-
-
-# 4️⃣ Full enterprise analysis – all in one
-@app.post("/legal/analyze", response_model=FullAnalysisResponse)
-def analyze(req: FullAnalysisRequest):
-    """
-    High-level enterprise endpoint:
-    - Summarize document
-    - Extract entities
-    - Generate generic clause suggestions
-    """
-
-    # --- summary ---
-    summary_result = client.summarization(
-        req.text,
-        model=LEGAL_SUMMARY_MODEL,
-        max_new_tokens=256,
-    )
-    if isinstance(summary_result, list):
-        summary_result = summary_result[0]
-    summary_text = summary_result["summary_text"]
-
-    # --- entities ---
-    raw_entities = client.token_classification(
-        req.text,
-        model=LEGAL_NER_MODEL,
-        aggregation_strategy="simple",
-    )
-    entities = [
-        NEREntity(
-            entity_group=e["entity_group"],
-            word=e["word"],
-            score=e["score"],
-            start=e["start"],
-            end=e["end"],
-        )
-        for e in raw_entities
-    ]
-
-    # --- generic clause suggestions with Legal-BERT ---
-    clause_prompt = (
-        "This Agreement may be [MASK] by the Company at any time without cause."
-    )
-    suggestions = client.fill_mask(
-        clause_prompt,
-        model=LEGAL_BERT_MODEL,
-        top_k=5,
-    )
-    clause_suggestions = [MaskResponseItem(**s) for s in suggestions]
-
-    return FullAnalysisResponse(
-        summary=summary_text,
-        entities=entities,
-        clause_suggestions=clause_suggestions,
-    )
-
-
-# 5️⃣ NEW – Contract Type Classification (Legal + Real Estate)
-@app.post("/legal/contract-type", response_model=ContractTypeResponse)
-def classify_contract_type(req: ContractTypeRequest):
-    """
-    Classify what type of contract this is using DeBERTa zero-shot classification.
-
-    Default labels are typical legal & real estate contracts:
-    Lease, Purchase, Listing, Property Management, NDA, Service, Employment, Other.
-    """
-
-    labels = req.labels or DEFAULT_CONTRACT_LABELS
 
     result = client.zero_shot_classification(
         req.text,
         labels=labels,
-        model=DEBERTA_ZS_MODEL,
-        multi_label=False,
+        model=MULTILINGUAL_DEBERTA,
+        multi_label=False
     )
 
-    # HF usually returns a dict: {"labels": [...], "scores": [...]}
     labels_out = result["labels"]
     scores_out = result["scores"]
-    best_idx = int(scores_out.index(max(scores_out)))
+    best_idx = scores_out.index(max(scores_out))
 
-    return ContractTypeResponse(
+    return DomainClassifyResponse(
         label=labels_out[best_idx],
         score=scores_out[best_idx],
         all_labels=labels_out,
-        all_scores=scores_out,
-    )
-
-
-# 6️⃣ NEW – Real Estate Risk Scoring
-@app.post("/realestate/risk-score", response_model=RiskScoreResponse)
-def realestate_risk_score(req: RiskScoreRequest):
-    """
-    Quick risk assessment for real estate contracts & deals.
-    Uses DeBERTa zero-shot classification over labels: Low / Medium / High risk.
-    """
-
-    result = client.zero_shot_classification(
-        req.text,
-        labels=DEFAULT_RISK_LABELS,
-        model=DEBERTA_ZS_MODEL,
-        multi_label=False,
-    )
-
-    labels_out = result["labels"]
-    scores_out = result["scores"]
-    best_idx = int(scores_out.index(max(scores_out)))
-
-    return RiskScoreResponse(
-        risk_label=labels_out[best_idx],
-        score=scores_out[best_idx],
-        all_labels=labels_out,
-        all_scores=scores_out,
+        all_scores=scores_out
     )
