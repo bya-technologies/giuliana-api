@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -16,18 +16,37 @@ client = InferenceClient(
     api_key=HF_TOKEN,
 )
 
-# Model IDs exactly as shown on Hugging Face
+# Core legal models
 LEGAL_BERT_MODEL = "nlpaueb/legal-bert-base-uncased"      # core legal BERT
 LEGAL_SUMMARY_MODEL = "nsi319/legal-pegasus"              # legal summarization
 LEGAL_NER_MODEL = "opennyaiorg/en_legal_ner_trf"          # legal NER
 
+# DeBERTa model for zero-shot contract / risk classification
+DEBERTA_ZS_MODEL = "microsoft/deberta-v3-base-mnli"
+
+# Default label sets
+DEFAULT_CONTRACT_LABELS = [
+    "Lease Agreement",
+    "Purchase Agreement",
+    "Listing Agreement",
+    "Property Management Agreement",
+    "Non-Disclosure Agreement",
+    "Service Agreement",
+    "Employment Contract",
+    "Other"
+]
+
+DEFAULT_RISK_LABELS = [
+    "Low risk",
+    "Medium risk",
+    "High risk"
+]
 
 # ------------------------------
 # FastAPI app
 # ------------------------------
 
-app = FastAPI(title="BYA Legal AI Enterprise API")
-
+app = FastAPI(title="BYA Legal & Real Estate AI API")
 
 # ------------------------------
 # Pydantic models
@@ -76,13 +95,38 @@ class FullAnalysisResponse(BaseModel):
     clause_suggestions: List[MaskResponseItem]
 
 
+# New: contract type classification
+class ContractTypeRequest(BaseModel):
+    text: str
+    labels: Optional[List[str]] = None   # optional custom label set
+
+
+class ContractTypeResponse(BaseModel):
+    label: str
+    score: float
+    all_labels: List[str]
+    all_scores: List[float]
+
+
+# New: real estate risk scoring
+class RiskScoreRequest(BaseModel):
+    text: str
+
+
+class RiskScoreResponse(BaseModel):
+    risk_label: str
+    score: float
+    all_labels: List[str]
+    all_scores: List[float]
+
+
 # ------------------------------
 # Routes
 # ------------------------------
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "BYA Legal AI API"}
+    return {"status": "ok", "service": "BYA Legal & Real Estate AI API"}
 
 
 # 1️⃣ Legal-BERT – fill mask
@@ -199,4 +243,63 @@ def analyze(req: FullAnalysisRequest):
         summary=summary_text,
         entities=entities,
         clause_suggestions=clause_suggestions,
+    )
+
+
+# 5️⃣ NEW – Contract Type Classification (Legal + Real Estate)
+@app.post("/legal/contract-type", response_model=ContractTypeResponse)
+def classify_contract_type(req: ContractTypeRequest):
+    """
+    Classify what type of contract this is using DeBERTa zero-shot classification.
+
+    Default labels are typical legal & real estate contracts:
+    Lease, Purchase, Listing, Property Management, NDA, Service, Employment, Other.
+    """
+
+    labels = req.labels or DEFAULT_CONTRACT_LABELS
+
+    result = client.zero_shot_classification(
+        req.text,
+        labels=labels,
+        model=DEBERTA_ZS_MODEL,
+        multi_label=False,
+    )
+
+    # HF usually returns a dict: {"labels": [...], "scores": [...]}
+    labels_out = result["labels"]
+    scores_out = result["scores"]
+    best_idx = int(scores_out.index(max(scores_out)))
+
+    return ContractTypeResponse(
+        label=labels_out[best_idx],
+        score=scores_out[best_idx],
+        all_labels=labels_out,
+        all_scores=scores_out,
+    )
+
+
+# 6️⃣ NEW – Real Estate Risk Scoring
+@app.post("/realestate/risk-score", response_model=RiskScoreResponse)
+def realestate_risk_score(req: RiskScoreRequest):
+    """
+    Quick risk assessment for real estate contracts & deals.
+    Uses DeBERTa zero-shot classification over labels: Low / Medium / High risk.
+    """
+
+    result = client.zero_shot_classification(
+        req.text,
+        labels=DEFAULT_RISK_LABELS,
+        model=DEBERTA_ZS_MODEL,
+        multi_label=False,
+    )
+
+    labels_out = result["labels"]
+    scores_out = result["scores"]
+    best_idx = int(scores_out.index(max(scores_out)))
+
+    return RiskScoreResponse(
+        risk_label=labels_out[best_idx],
+        score=scores_out[best_idx],
+        all_labels=labels_out,
+        all_scores=scores_out,
     )
