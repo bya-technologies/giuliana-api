@@ -472,4 +472,380 @@ def classify_contract_type(req: ContractTypeRequest):
 
     labels_out = result["labels"]
     scores_out = result["scores"]
-    best_idx = int(scores_out
+    best_idx = int(scores_out.index(max(scores_out)))
+
+    return ContractTypeResponse(
+        label=labels_out[best_idx],
+        score=float(scores_out[best_idx]),
+        all_labels=labels_out,
+        all_scores=[float(s) for s in scores_out],
+    )
+
+
+# 6️⃣ Real Estate Risk Scoring
+@app.post("/realestate/risk-score", response_model=RiskScoreResponse)
+def realestate_risk_score(req: RiskScoreRequest):
+    """
+    Quick risk assessment for real estate contracts & deals.
+    """
+
+    result = client.zero_shot_classification(
+        req.text,
+        labels=DEFAULT_RISK_LABELS,
+        model=DEBERTA_ZS_MODEL,
+        multi_label=False,
+    )
+
+    labels_out = result["labels"]
+    scores_out = result["scores"]
+    best_idx = int(scores_out.index(max(scores_out)))
+
+    return RiskScoreResponse(
+        risk_label=labels_out[best_idx],
+        score=float(scores_out[best_idx]),
+        all_labels=labels_out,
+        all_scores=[float(s) for s in scores_out],
+    )
+
+
+# 7️⃣ Multilingual Legal Domain Classification
+@app.post("/legal/domain-classify", response_model=DomainClassifyResponse)
+def legal_domain_classify(req: DomainClassifyRequest):
+    """
+    Multilingual zero-shot classifier for legal text.
+    Detects if content relates to family, civil, contract, real estate, etc.
+    """
+
+    labels = req.labels or DEFAULT_DOMAIN_LABELS
+
+    result = client.zero_shot_classification(
+        req.text,
+        labels=labels,
+        model=MULTILINGUAL_DEBERTA,
+        multi_label=False,
+    )
+
+    labels_out = result["labels"]
+    scores_out = result["scores"]
+    best_idx = int(scores_out.index(max(scores_out)))
+
+    return DomainClassifyResponse(
+        label=labels_out[best_idx],
+        score=float(scores_out[best_idx]),
+        all_labels=labels_out,
+        all_scores=[float(s) for s in scores_out],
+    )
+
+
+# 8️⃣ Multilingual Legal Question Answering
+@app.post("/legal/qa-multilingual", response_model=LegalQAResponse)
+def legal_qa_multilingual(req: LegalQARequest):
+    """
+    Answer a legal question based on the provided contract or document.
+    Works across multiple languages.
+    """
+
+    result = client.question_answering(
+        question=req.question,
+        context=req.context,
+        model=MULTILINGUAL_QA_MODEL,
+    )
+
+    return LegalQAResponse(
+        answer=result["answer"],
+        score=float(result["score"]),
+        start=int(result["start"]),
+        end=int(result["end"]),
+    )
+
+
+# 9️⃣ Legal Redaction / PII Masking
+@app.post("/legal/redact", response_model=RedactResponse)
+def legal_redact(req: RedactRequest):
+    """
+    Redact detected legal entities (names, orgs, locations, etc.)
+    from the input text using the LEGAL_NER_MODEL.
+    """
+
+    text = req.text
+
+    entities = client.token_classification(
+        text,
+        model=LEGAL_NER_MODEL,
+        aggregation_strategy="simple",
+    )
+
+    ent_objs: List[NEREntity] = [
+        NEREntity(
+            entity_group=e["entity_group"],
+            word=e["word"],
+            score=float(e["score"]),
+            start=int(e["start"]),
+            end=int(e["end"]),
+        )
+        for e in entities
+    ]
+
+    ent_sorted = sorted(entities, key=lambda e: int(e["start"]))
+    redacted_parts: List[str] = []
+    last_idx = 0
+
+    for e in ent_sorted:
+        s = int(e["start"])
+        e_end = int(e["end"])
+        label = e.get("entity_group") or e.get("entity", "ENTITY")
+
+        redacted_parts.append(text[last_idx:s])
+        redacted_parts.append(f"[{label}]")
+        last_idx = e_end
+
+    redacted_parts.append(text[last_idx:])
+    redacted_text = "".join(redacted_parts)
+
+    return RedactResponse(
+        redacted_text=redacted_text,
+        entities=ent_objs,
+    )
+
+
+# 🔟 Case law search (stub for now)
+@app.post("/legal/search-caselaw", response_model=CaseLawSearchResponse)
+def search_caselaw(req: CaseLawSearchRequest):
+    """
+    Stub case law search.
+    In production, replace with a real vector DB / legal provider.
+    """
+
+    demo_case = CaseLawItem(
+        title="Example v. Example Co.",
+        citation="123 F.3d 456 (9th Cir. 2024)",
+        summary=f"Demo precedent related to: {req.query}",
+        jurisdiction=req.jurisdiction or "N/A",
+    )
+
+    return CaseLawSearchResponse(results=[demo_case])
+
+
+# 1️⃣1️⃣ Citation formatter
+@app.post("/legal/cite", response_model=CiteResponse)
+def format_citation(req: CiteRequest):
+    """
+    Format a simple case citation string.
+    """
+
+    parts: List[str] = [req.case_name]
+    if req.court and req.year:
+        parts.append(f"{req.court} ({req.year})")
+    elif req.year:
+        parts.append(f"({req.year})")
+    if req.raw_reference:
+        parts.append(req.raw_reference)
+
+    citation = ", ".join(parts)
+    return CiteResponse(citation=citation)
+
+
+# 1️⃣2️⃣ NDA drafting
+@app.post("/legal/draft/nda", response_model=DraftResponse)
+def draft_nda(req: NDADraftRequest):
+    """
+    Generate an NDA first draft (for lawyer review, not legal advice).
+    """
+
+    purpose = req.purpose or "discussing a potential business relationship"
+    unilateral_str = "unilateral" if req.unilateral else "mutual"
+
+    prompt = f"""
+You are an assistant for lawyers. Draft a {unilateral_str} Non-Disclosure Agreement
+between "{req.party_a}" and "{req.party_b}" under the laws of {req.governing_law}.
+The term of confidentiality is {req.term_months} months.
+Purpose of the NDA: {purpose}.
+
+Include standard sections: definitions, confidential information, exclusions,
+obligations, term and termination, remedies, governing law, and miscellaneous.
+Write in clear professional legal English and clearly mark this as a draft
+for attorney review only.
+"""
+    draft = llm_generate(prompt, max_new_tokens=1200)
+    return DraftResponse(draft_text=draft)
+
+
+# 1️⃣3️⃣ Service agreement drafting
+@app.post("/legal/draft/service-agreement", response_model=DraftResponse)
+def draft_service_agreement(req: ServiceAgreementDraftRequest):
+    """
+    Generate a service agreement draft for lawyer review.
+    """
+
+    prompt = f"""
+You are an assistant for law firms. Draft a professional services agreement
+between client "{req.client_name}" and provider "{req.provider_name}".
+Governing law: {req.governing_law}.
+
+Scope of services: {req.scope}
+Fee structure: {req.fee_structure}
+Term: {req.term_description}
+
+Include clear limitation of liability, IP ownership, confidentiality,
+termination, dispute resolution, and data privacy sections.
+Label the output as a draft that must be reviewed and customized by an attorney.
+"""
+    draft = llm_generate(prompt, max_new_tokens=1400)
+    return DraftResponse(draft_text=draft)
+
+
+# 1️⃣4️⃣ Full legal review report (high-level)
+@app.post("/legal/review/report", response_model=ReviewReportResponse)
+def review_report(req: ReviewReportRequest):
+    """
+    Generate a structured review for a contract:
+    - summary
+    - key clauses
+    - red flags
+    - missing clauses
+    - recommendations
+    """
+
+    prompt = f"""
+You are assisting a law firm. Analyze the following contract text
+for a high-level review. Jurisdiction: {req.jurisdiction or "unspecified"}.
+Contract type: {req.contract_type or "unspecified"}.
+
+Contract text:
+\"\"\"{req.text}\"\"\".
+
+1) Provide a 3-5 sentence executive summary.
+2) List the 5-10 most important clauses (titles only).
+3) List major red flags with severity (info/warning/high) and short description.
+4) List important clauses that appear to be missing.
+5) Give concise recommendations for the reviewing attorney.
+
+Return your answer as clear, structured bullet points under the headings:
+SUMMARY, KEY_CLAUSES, RED_FLAGS, MISSING_CLAUSES, RECOMMENDATIONS.
+"""
+    raw = llm_generate(prompt, max_new_tokens=1600)
+
+    # Minimal placeholder: we keep everything in recommendations for now.
+    return ReviewReportResponse(
+        summary="See detailed analysis below.",
+        key_clauses=[],
+        red_flags=[],
+        missing_clauses=[],
+        recommendations=[raw],
+    )
+
+
+# 1️⃣5️⃣ Missing clauses (lighter endpoint)
+@app.post("/legal/missing-clauses", response_model=MissingClausesResponse)
+def missing_clauses(req: ReviewReportRequest):
+    """
+    Suggest important clauses that appear to be missing.
+    """
+
+    prompt = f"""
+Given the following contract text, list important clauses that appear to be missing.
+Only output a bullet list of clause names. Contract type: {req.contract_type or "unspecified"}.
+
+Text:
+\"\"\"{req.text}\"\"\".
+"""
+    raw = llm_generate(prompt, max_new_tokens=600)
+    clauses = [line.strip("-• ").strip() for line in raw.splitlines() if line.strip()]
+    return MissingClausesResponse(missing_clauses=clauses)
+
+
+# 1️⃣6️⃣ Privacy / data protection score
+@app.post("/legal/compliance/privacy-score", response_model=PrivacyScoreResponse)
+def privacy_score(req: PrivacyScoreRequest):
+    """
+    Heuristic privacy score for data-protection clauses (for attorney review).
+    """
+
+    prompt = f"""
+You are assisting a privacy lawyer. Read the following text and evaluate
+how strong the privacy/data-protection language is.
+
+Text:
+\"\"\"{req.text}\"\"\".
+
+Rate from 0 (no privacy protection) to 100 (very strong and detailed).
+List main strengths and main issues in short bullet points.
+Return clearly marked sections: SCORE, STRENGTHS, ISSUES.
+"""
+    raw = llm_generate(prompt, max_new_tokens=700)
+
+    # Placeholder: real parsing can be added later
+    return PrivacyScoreResponse(
+        score=70,
+        issues=[raw],
+        strengths=[],
+    )
+
+
+# 1️⃣7️⃣ Litigation summary
+@app.post("/litigation/summary", response_model=LitigationSummaryResponse)
+def litigation_summary(req: LitigationSummaryRequest):
+    """
+    Summarize a pleading or motion: parties, issues, requested relief, timeline.
+    """
+
+    prompt = f"""
+You assist litigation attorneys. Analyze the following pleading/motion text
+and extract:
+- Parties involved
+- Key legal issues
+- Relief requested
+- Brief timeline of events
+- 3-5 sentence summary in plain language.
+
+Text:
+\"\"\"{req.text}\"\"\".
+"""
+    raw = llm_generate(prompt, max_new_tokens=1000)
+
+    return LitigationSummaryResponse(
+        parties=[],
+        issues=[],
+        requested_relief="See analysis in summary field.",
+        timeline=None,
+        summary=raw,
+    )
+
+
+# 1️⃣8️⃣ Deposition question generator
+@app.post("/litigation/deposition-questions", response_model=DepositionQuestionsResponse)
+def deposition_questions(req: DepositionQuestionsRequest):
+    """
+    Suggest deposition questions based on case facts and witness role.
+    """
+
+    topics_str = ", ".join(req.topics) if req.topics else "key disputed facts"
+    prompt = f"""
+You help litigators brainstorm deposition questions.
+Case facts summary:
+{req.facts_summary}
+
+Witness role: {req.witness_role}
+Focus topics: {topics_str}
+
+Draft a list of focused, neutral-sounding deposition questions that
+an attorney could consider using. Do NOT include commentary, only the questions.
+"""
+    raw = llm_generate(prompt, max_new_tokens=700)
+    questions = [q.strip("-• ").strip() for q in raw.splitlines() if q.strip()]
+    return DepositionQuestionsResponse(questions=questions)
+
+
+# 1️⃣9️⃣ OCR PDF stub (to be replaced by real OCR)
+@app.post("/ocr/pdf", response_model=OCRPdfResponse)
+def ocr_pdf(req: OCRPdfRequest):
+    """
+    Placeholder endpoint for PDF OCR.
+    In production, fetch the file from file_url and run an OCR model.
+    """
+
+    demo_text = (
+        "OCR not yet implemented. This is a placeholder for file: "
+        f"{req.file_url}"
+    )
+    return OCRPdfResponse(text=demo_text, num_pages=None)
