@@ -1,9 +1,188 @@
-# === New model IDs for advanced features ===
+import os
+from typing import List, Optional
 
-ADV_DRAFTING_MODEL = "deepseek-ai/DeepSeek-R1"  # or another strong LLM you like
-EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"  # for search stubs
+from fastapi import FastAPI
+from pydantic import BaseModel
+from huggingface_hub import InferenceClient
 
-# === New Pydantic models ===
+# ------------------------------
+# Hugging Face setup
+# ------------------------------
+
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+client = InferenceClient(
+    provider="hf-inference",
+    api_key=HF_TOKEN,
+)
+
+# ------------------------------
+# Model IDs
+# ------------------------------
+
+# Core legal models
+LEGAL_BERT_MODEL = "nlpaueb/legal-bert-base-uncased"      # core legal BERT (fill-mask)
+LEGAL_SUMMARY_MODEL = "nsi319/legal-pegasus"              # legal summarization
+LEGAL_NER_MODEL = "opennyaiorg/en_legal_ner_trf"          # legal NER
+
+# Classification models
+DEBERTA_ZS_MODEL = "microsoft/deberta-v3-base-mnli"       # contract / risk classification (EN)
+MULTILINGUAL_DEBERTA = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"  # multilingual domain classify
+
+# QA models
+MULTILINGUAL_QA_MODEL = "deepset/xlm-roberta-large-squad2"        # multilingual QA
+
+# Drafting / reasoning LLM (you can swap this to any HF text-generation model you prefer)
+ADV_DRAFTING_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+# Embedding model placeholder (for future case law search)
+EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
+
+# Default label sets
+DEFAULT_CONTRACT_LABELS = [
+    "Lease Agreement",
+    "Purchase Agreement",
+    "Listing Agreement",
+    "Property Management Agreement",
+    "Non-Disclosure Agreement",
+    "Service Agreement",
+    "Employment Contract",
+    "Other",
+]
+
+DEFAULT_RISK_LABELS = [
+    "Low risk",
+    "Medium risk",
+    "High risk",
+]
+
+DEFAULT_DOMAIN_LABELS = [
+    "Family law",
+    "Civil law",
+    "Contract law",
+    "Real estate law",
+    "Corporate law",
+    "Criminal law",
+    "Labor law",
+    "Immigration law",
+]
+
+# ------------------------------
+# FastAPI app
+# ------------------------------
+
+app = FastAPI(title="BYA Legal & Real Estate AI API")
+
+# ------------------------------
+# Pydantic models
+# ------------------------------
+
+# --- Core NLP ---
+
+class MaskRequest(BaseModel):
+    text: str               # sentence containing [MASK]
+    top_k: int = 5          # number of suggestions
+
+
+class MaskResponseItem(BaseModel):
+    sequence: str
+    score: float
+    token: int
+    token_str: str
+
+
+class SummarizeRequest(BaseModel):
+    text: str               # long legal text
+    max_length: int = 256   # max length of summary (tokens)
+
+
+class SummaryResponse(BaseModel):
+    summary_text: str
+
+
+class NERRequest(BaseModel):
+    text: str               # legal text
+
+
+class NEREntity(BaseModel):
+    entity_group: str
+    word: str
+    score: float
+    start: int
+    end: int
+
+
+class FullAnalysisRequest(BaseModel):
+    text: str               # full contract or document
+
+
+class FullAnalysisResponse(BaseModel):
+    summary: str
+    entities: List[NEREntity]
+    clause_suggestions: List[MaskResponseItem]
+
+
+# --- Classification ---
+
+class ContractTypeRequest(BaseModel):
+    text: str
+    labels: Optional[List[str]] = None   # optional custom label set
+
+
+class ContractTypeResponse(BaseModel):
+    label: str
+    score: float
+    all_labels: List[str]
+    all_scores: List[float]
+
+
+class RiskScoreRequest(BaseModel):
+    text: str
+
+
+class RiskScoreResponse(BaseModel):
+    risk_label: str
+    score: float
+    all_labels: List[str]
+    all_scores: List[float]
+
+
+class DomainClassifyRequest(BaseModel):
+    text: str
+    labels: Optional[List[str]] = None
+
+
+class DomainClassifyResponse(BaseModel):
+    label: str
+    score: float
+    all_labels: List[str]
+    all_scores: List[float]
+
+
+# --- QA & Redaction ---
+
+class LegalQARequest(BaseModel):
+    question: str
+    context: str   # full contract or legal text
+
+
+class LegalQAResponse(BaseModel):
+    answer: str
+    score: float
+    start: int
+    end: int
+
+
+class RedactRequest(BaseModel):
+    text: str      # input legal document text
+
+
+class RedactResponse(BaseModel):
+    redacted_text: str
+    entities: List[NEREntity]
+
+
+# --- Case law & citation ---
 
 class CaseLawSearchRequest(BaseModel):
     query: str
@@ -33,6 +212,8 @@ class CiteResponse(BaseModel):
     citation: str
 
 
+# --- Drafting ---
+
 class NDADraftRequest(BaseModel):
     party_a: str
     party_b: str
@@ -54,6 +235,8 @@ class ServiceAgreementDraftRequest(BaseModel):
     fee_structure: str
     term_description: str
 
+
+# --- Review & compliance ---
 
 class ReviewReportRequest(BaseModel):
     text: str
@@ -90,6 +273,8 @@ class PrivacyScoreResponse(BaseModel):
     strengths: List[str]
 
 
+# --- Litigation ---
+
 class LitigationSummaryRequest(BaseModel):
     text: str
 
@@ -112,6 +297,8 @@ class DepositionQuestionsResponse(BaseModel):
     questions: List[str]
 
 
+# --- OCR / PDF ---
+
 class OCRPdfRequest(BaseModel):
     file_url: str  # URL to PDF stored in S3/GDrive/etc.
 
@@ -121,268 +308,168 @@ class OCRPdfResponse(BaseModel):
     num_pages: Optional[int] = None
 
 
-# === Helper for generic text generation with an LLM ===
+# ------------------------------
+# Helper functions
+# ------------------------------
 
 def llm_generate(prompt: str, max_new_tokens: int = 1024) -> str:
     """
-    Generic wrapper to call a text-generation model safely.
-    You can later swap this to any HF-compatible LLM.
+    Generic wrapper to call a text-generation model.
+    You can later swap ADV_DRAFTING_MODEL to any HF LLM you like.
     """
     result = client.text_generation(
         prompt,
         model=ADV_DRAFTING_MODEL,
         max_new_tokens=max_new_tokens,
     )
-    # some HF endpoints return dict, others str; normalize
+
     if isinstance(result, dict) and "generated_text" in result:
         return result["generated_text"]
     if isinstance(result, str):
         return result
-    # fallback
     return str(result)
 
 
-# === New endpoints ===
+# ------------------------------
+# Routes
+# ------------------------------
 
-# 1) Case law search (stubbed – later connect to a vector DB or legal API)
-@app.post("/legal/search-caselaw", response_model=CaseLawSearchResponse)
-def search_caselaw(req: CaseLawSearchRequest):
-    """
-    Stub case law search.
-    In production, replace with a real vector DB / legal provider.
-    """
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "BYA Legal & Real Estate AI API"}
 
-    # TODO: replace with real retrieval
-    demo_case = CaseLawItem(
-        title="Example v. Example Co.",
-        citation="123 F.3d 456 (9th Cir. 2024)",
-        summary=f"Demo precedent related to: {req.query}",
-        jurisdiction=req.jurisdiction or "N/A",
+
+# 1️⃣ Legal-BERT – fill mask
+@app.post("/legal/fill-mask", response_model=List[MaskResponseItem])
+def fill_mask(req: MaskRequest):
+    """
+    Predict missing legal terms in clauses using Legal-BERT.
+    Example:
+    {
+      "text": "This Agreement shall be [MASK] by both parties.",
+      "top_k": 5
+    }
+    """
+    result = client.fill_mask(
+        req.text,
+        model=LEGAL_BERT_MODEL,
+        top_k=req.top_k,
+    )
+    # HF returns list[dict] – FastAPI will coerce to MaskResponseItem automatically
+    return result
+
+
+# 2️⃣ Legal summarization – Pegasus
+@app.post("/legal/summarize", response_model=SummaryResponse)
+def summarize(req: SummarizeRequest):
+    """
+    Summarize long contracts or legal documents.
+    """
+    result = client.summarization(
+        req.text,
+        model=LEGAL_SUMMARY_MODEL,
+        max_new_tokens=req.max_length,
     )
 
-    return CaseLawSearchResponse(results=[demo_case])
+    if isinstance(result, list):
+        result = result[0]
+
+    return SummaryResponse(summary_text=result["summary_text"])
 
 
-# 2) Citation formatter
-@app.post("/legal/cite", response_model=CiteResponse)
-def format_citation(req: CiteRequest):
+# 3️⃣ Legal NER – entities / clauses
+@app.post("/legal/entities", response_model=List[NEREntity])
+def extract_entities(req: NERRequest):
     """
-    Format a simple case citation string.
+    Extract legal entities: PARTY, DATE, MONEY, LAW, LOCATION, etc.
     """
+    entities = client.token_classification(
+        req.text,
+        model=LEGAL_NER_MODEL,
+        aggregation_strategy="simple",
+    )
 
-    parts = [req.case_name]
-    if req.court and req.year:
-        parts.append(f"{req.court} ({req.year})")
-    elif req.year:
-        parts.append(f"({req.year})")
-    if req.raw_reference:
-        parts.append(req.raw_reference)
+    return [
+        NEREntity(
+            entity_group=e["entity_group"],
+            word=e["word"],
+            score=float(e["score"]),
+            start=int(e["start"]),
+            end=int(e["end"]),
+        )
+        for e in entities
+    ]
 
-    citation = ", ".join(parts)
-    return CiteResponse(citation=citation)
 
-
-# 3) NDA drafting
-@app.post("/legal/draft/nda", response_model=DraftResponse)
-def draft_nda(req: NDADraftRequest):
+# 4️⃣ Full enterprise analysis – all in one
+@app.post("/legal/analyze", response_model=FullAnalysisResponse)
+def analyze(req: FullAnalysisRequest):
     """
-    Generate an NDA first draft (for lawyer review, not legal advice).
-    """
-
-    purpose = req.purpose or "discussing a potential business relationship"
-    unilateral_str = "unilateral" if req.unilateral else "mutual"
-
-    prompt = f"""
-You are an assistant for lawyers. Draft a {unilateral_str} Non-Disclosure Agreement
-between "{req.party_a}" and "{req.party_b}" under the laws of {req.governing_law}.
-The term of confidentiality is {req.term_months} months.
-Purpose of the NDA: {purpose}.
-
-Include standard sections: definitions, confidential information, exclusions,
-obligations, term and termination, remedies, governing law, and miscellaneous.
-Write in clear professional legal English and clearly mark this as a draft
-for attorney review only.
-"""
-    draft = llm_generate(prompt, max_new_tokens=1200)
-    return DraftResponse(draft_text=draft)
-
-
-# 4) Service agreement drafting
-@app.post("/legal/draft/service-agreement", response_model=DraftResponse)
-def draft_service_agreement(req: ServiceAgreementDraftRequest):
-    """
-    Generate a service agreement draft for lawyer review.
+    High-level enterprise endpoint:
+    - Summarize document
+    - Extract entities
+    - Generate generic clause suggestions
     """
 
-    prompt = f"""
-You are an assistant for law firms. Draft a professional services agreement
-between client "{req.client_name}" and provider "{req.provider_name}".
-Governing law: {req.governing_law}.
+    # summary
+    summary_result = client.summarization(
+        req.text,
+        model=LEGAL_SUMMARY_MODEL,
+        max_new_tokens=256,
+    )
+    if isinstance(summary_result, list):
+        summary_result = summary_result[0]
+    summary_text = summary_result["summary_text"]
 
-Scope of services: {req.scope}
-Fee structure: {req.fee_structure}
-Term: {req.term_description}
+    # entities
+    raw_entities = client.token_classification(
+        req.text,
+        model=LEGAL_NER_MODEL,
+        aggregation_strategy="simple",
+    )
+    entities = [
+        NEREntity(
+            entity_group=e["entity_group"],
+            word=e["word"],
+            score=float(e["score"]),
+            start=int(e["start"]),
+            end=int(e["end"]),
+        )
+        for e in raw_entities
+    ]
 
-Include clear limitation of liability, IP ownership, confidentiality,
-termination, dispute resolution, and data privacy sections.
-Label the output as a draft that must be reviewed and customized by an attorney.
-"""
-    draft = llm_generate(prompt, max_new_tokens=1400)
-    return DraftResponse(draft_text=draft)
+    # clause suggestions via Legal-BERT
+    clause_prompt = "This Agreement may be [MASK] by the Company at any time without cause."
+    suggestions = client.fill_mask(
+        clause_prompt,
+        model=LEGAL_BERT_MODEL,
+        top_k=5,
+    )
+    clause_suggestions = [MaskResponseItem(**s) for s in suggestions]
 
-
-# 5) Full legal review report (high-level)
-@app.post("/legal/review/report", response_model=ReviewReportResponse)
-def review_report(req: ReviewReportRequest):
-    """
-    Generate a structured review for a contract:
-    - summary
-    - key clauses
-    - red flags
-    - missing clauses
-    - recommendations
-    """
-
-    prompt = f"""
-You are assisting a law firm. Analyze the following contract text
-for a high-level review. Jurisdiction: {req.jurisdiction or "unspecified"}.
-Contract type: {req.contract_type or "unspecified"}.
-
-Contract text:
-\"\"\"{req.text}\"\"\".
-
-1) Provide a 3-5 sentence executive summary.
-2) List the 5-10 most important clauses (titles only).
-3) List major red flags with severity (info/warning/high) and short description.
-4) List important clauses that appear to be missing.
-5) Give concise recommendations for the reviewing attorney.
-
-Return your answer in a structured JSON-like format with sections:
-SUMMARY, KEY_CLAUSES, RED_FLAGS, MISSING_CLAUSES, RECOMMENDATIONS.
-"""
-    raw = llm_generate(prompt, max_new_tokens=1600)
-
-    # For now, we do a very simple parse: lawyer can read "raw".
-    # To keep response predictable, we just wrap raw text into the fields.
-    # Later you can post-process with a structured-output model.
-    return ReviewReportResponse(
-        summary="See LLM output below.",
-        key_clauses=[raw[:400]],  # minimal placeholder
-        red_flags=[],
-        missing_clauses=[],
-        recommendations=[raw],
+    return FullAnalysisResponse(
+        summary=summary_text,
+        entities=entities,
+        clause_suggestions=clause_suggestions,
     )
 
 
-# 6) Missing clauses (lighter endpoint)
-@app.post("/legal/missing-clauses", response_model=MissingClausesResponse)
-def missing_clauses(req: ReviewReportRequest):
+# 5️⃣ Contract Type Classification (Legal + Real Estate)
+@app.post("/legal/contract-type", response_model=ContractTypeResponse)
+def classify_contract_type(req: ContractTypeRequest):
     """
-    Suggest important clauses that appear to be missing.
-    """
-
-    prompt = f"""
-Given the following contract text, list important clauses that appear to be missing.
-Only output a bullet list of clause names. Contract type: {req.contract_type or "unspecified"}.
-
-Text:
-\"\"\"{req.text}\"\"\".
-"""
-    raw = llm_generate(prompt, max_new_tokens=600)
-    clauses = [line.strip("-• ").strip() for line in raw.splitlines() if line.strip()]
-    return MissingClausesResponse(missing_clauses=clauses)
-
-
-# 7) Privacy / data protection score
-@app.post("/legal/compliance/privacy-score", response_model=PrivacyScoreResponse)
-def privacy_score(req: PrivacyScoreRequest):
-    """
-    Heuristic privacy score for data-protection clauses (for attorney review).
+    Classify what type of contract this is using DeBERTa zero-shot classification.
     """
 
-    prompt = f"""
-You are assisting a privacy lawyer. Read the following text and evaluate
-how strong the privacy/data-protection language is.
+    labels = req.labels or DEFAULT_CONTRACT_LABELS
 
-Text:
-\"\"\"{req.text}\"\"\".
-
-Rate from 0 (no privacy protection) to 100 (very strong and detailed).
-List main strengths and main issues in short bullet points.
-Return in a JSON-like format: SCORE, STRENGTHS, ISSUES.
-"""
-    raw = llm_generate(prompt, max_new_tokens=700)
-
-    # Simple placeholder parsing
-    return PrivacyScoreResponse(
-        score=70,
-        issues=[raw],
-        strengths=[],
+    result = client.zero_shot_classification(
+        req.text,
+        labels=labels,
+        model=DEBERTA_ZS_MODEL,
+        multi_label=False,
     )
 
-
-# 8) Litigation summary
-@app.post("/litigation/summary", response_model=LitigationSummaryResponse)
-def litigation_summary(req: LitigationSummaryRequest):
-    """
-    Summarize a pleading or motion: parties, issues, requested relief, timeline.
-    """
-
-    prompt = f"""
-You assist litigation attorneys. Analyze the following pleading/motion text
-and extract:
-- Parties involved
-- Key legal issues
-- Relief requested
-- Brief timeline of events
-- 3-5 sentence summary in plain language.
-
-Text:
-\"\"\"{req.text}\"\"\".
-"""
-    raw = llm_generate(prompt, max_new_tokens=1000)
-    return LitigationSummaryResponse(
-        parties=[],
-        issues=[],
-        requested_relief="See analysis in full_text field below.",
-        timeline=None,
-        summary=raw,
-    )
-
-
-# 9) Deposition question generator
-@app.post("/litigation/deposition-questions", response_model=DepositionQuestionsResponse)
-def deposition_questions(req: DepositionQuestionsRequest):
-    """
-    Suggest deposition questions based on case facts and witness role.
-    """
-
-    topics_str = ", ".join(req.topics) if req.topics else "key disputed facts"
-    prompt = f"""
-You help litigators brainstorm deposition questions.
-Case facts summary:
-{req.facts_summary}
-
-Witness role: {req.witness_role}
-Focus topics: {topics_str}
-
-Draft a list of focused, neutral-sounding deposition questions that
-an attorney could consider using. Do NOT include instructions or commentary,
-only the questions.
-"""
-    raw = llm_generate(prompt, max_new_tokens=700)
-    questions = [q.strip("-• ").strip() for q in raw.splitlines() if q.strip()]
-    return DepositionQuestionsResponse(questions=questions)
-
-
-# 10) OCR PDF stub (to be replaced by real OCR)
-@app.post("/ocr/pdf", response_model=OCRPdfResponse)
-def ocr_pdf(req: OCRPdfRequest):
-    """
-    Placeholder endpoint for PDF OCR.
-    In production, fetch the file from file_url and run an OCR model.
-    """
-
-    # TODO: integrate real OCR pipeline (e.g., LayoutLM / Donut / external service)
-    demo_text = f"OCR not yet implemented. This is a placeholder for file: {req.file_url}"
-    return OCRPdfResponse(text=demo_text, num_pages=None)
+    labels_out = result["labels"]
+    scores_out = result["scores"]
+    best_idx = int(scores_out
