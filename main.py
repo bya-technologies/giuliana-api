@@ -383,7 +383,6 @@ def fill_mask(req: MaskRequest):
         model=LEGAL_BERT_MODEL,
         top_k=req.top_k,
     )
-    # HF returns list[dict] – FastAPI will coerce to MaskResponseItem automatically
     return result
 
 
@@ -899,7 +898,6 @@ def real_estate_listing_analyze(req: RealEstateListingRequest):
     if isinstance(response, list) and len(response) > 0:
         best = max(response, key=lambda x: x.get("score", 0.0))
     else:
-        # fallback in case of unexpected format
         best = {"label": "UNKNOWN", "score": 0.0}
 
     return RealEstateListingResponse(
