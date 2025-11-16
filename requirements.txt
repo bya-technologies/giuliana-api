@@ -1,4 +1,6 @@
 fastapi
 uvicorn[standard]
-huggingface_hub
-python-multipart
+huggingface-hub
+transformers
+torch
+requests>=2.31.0
