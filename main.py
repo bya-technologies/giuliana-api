@@ -1,6 +1,7 @@
 import os
 from typing import List, Optional
 
+import requests
 from fastapi import FastAPI
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
@@ -40,7 +41,6 @@ EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
 # Real estate specific models
 REAL_ESTATE_LISTING_MODEL = "interneuronai/real_estate_listing_analysis_bart"
-# (future) floor plan vision model – to be wired later
 FLOORPLAN_VLM_MODEL = "sabaridsnfuji/FloorPlanVisionAIAdaptor"
 
 # Default label sets
@@ -325,7 +325,7 @@ class RealEstateListingResponse(BaseModel):
     raw: List[dict]      # full raw output from the model
 
 
-# --- Real Estate Floor Plan Analysis (stub) ---
+# --- Real Estate Floor Plan Analysis ---
 
 class FloorPlanAnalyzeRequest(BaseModel):
     file_url: str           # URL to the floor plan image (S3, GDrive, etc.)
@@ -333,7 +333,7 @@ class FloorPlanAnalyzeRequest(BaseModel):
 
 
 class FloorPlanAnalyzeResponse(BaseModel):
-    analysis_text: str      # human-readable analysis / placeholder
+    analysis_text: str      # human-readable analysis / description
 
 
 # ------------------------------
@@ -356,6 +356,16 @@ def llm_generate(prompt: str, max_new_tokens: int = 1024) -> str:
     if isinstance(result, str):
         return result
     return str(result)
+
+
+def fetch_image_bytes(url: str) -> bytes:
+    """
+    Download an image from a URL and return raw bytes.
+    Used for floor plan analysis.
+    """
+    resp = requests.get(url)
+    resp.raise_for_status()
+    return resp.content
 
 
 # ------------------------------
@@ -752,7 +762,6 @@ SUMMARY, KEY_CLAUSES, RED_FLAGS, MISSING_CLAUSES, RECOMMENDATIONS.
 """
     raw = llm_generate(prompt, max_new_tokens=1600)
 
-    # Minimal placeholder: we keep everything in recommendations for now.
     return ReviewReportResponse(
         summary="See detailed analysis below.",
         key_clauses=[],
@@ -801,7 +810,6 @@ Return clearly marked sections: SCORE, STRENGTHS, ISSUES.
 """
     raw = llm_generate(prompt, max_new_tokens=700)
 
-    # Placeholder: real parsing can be added later
     return PrivacyScoreResponse(
         score=70,
         issues=[raw],
@@ -884,9 +892,6 @@ def real_estate_listing_analyze(req: RealEstateListingRequest):
     """
     Analyze real estate listing or property description text.
     Uses a BART-based classifier to categorize the listing and surface its type.
-    Example use cases:
-    - Classify as apartment / office / retail / new building / etc.
-    - Pre-screen listings for brokers, investors, or legal review.
     """
 
     response = client.text_classification(
@@ -894,7 +899,6 @@ def real_estate_listing_analyze(req: RealEstateListingRequest):
         model=REAL_ESTATE_LISTING_MODEL,
     )
 
-    # Hugging Face usually returns a list of {"label": "...", "score": float}
     if isinstance(response, list) and len(response) > 0:
         best = max(response, key=lambda x: x.get("score", 0.0))
     else:
@@ -907,23 +911,57 @@ def real_estate_listing_analyze(req: RealEstateListingRequest):
     )
 
 
-# 2️⃣1️⃣ Real Estate Floor Plan Analysis (stub / future vision integration)
+# 2️⃣1️⃣ Real Estate Floor Plan Analysis
 @app.post("/realestate/floorplan-analyze", response_model=FloorPlanAnalyzeResponse)
 def floorplan_analyze(req: FloorPlanAnalyzeRequest):
     """
-    Placeholder endpoint for floor plan analysis.
-    In the next phase, this can be connected to a vision-language model
-    (e.g., FloorPlanVisionAIAdaptor) to extract layout, room counts, etc.
+    Analyze a floor plan image using a vision-language model.
 
-    For now, it simply echoes a structured message that can be shown in the UI.
+    - Input: URL to a floor plan image (PNG/JPG, or PDF converted to image)
+    - Output: Natural language description of layout, rooms, and key features.
     """
 
-    base_msg = (
-        f"Floor plan analysis is in preview. Received file URL: {req.file_url}."
-        " In the next release, this endpoint will extract layout details such as"
-        " room count, approximate area, and key features using a vision model."
-    )
-    if req.notes:
-        base_msg += f" Notes provided by user: {req.notes}"
+    # 1) Download floor plan image
+    try:
+        image_bytes = fetch_image_bytes(req.file_url)
+    except Exception as e:
+        return FloorPlanAnalyzeResponse(
+            analysis_text=f"Could not download floor plan image: {e}"
+        )
 
-    return FloorPlanAnalyzeResponse(analysis_text=base_msg)
+    # 2) Call HF image-to-text / captioning endpoint
+    try:
+        result = client.image_to_text(
+            image=image_bytes,
+            model=FLOORPLAN_VLM_MODEL,
+            max_new_tokens=256,
+        )
+    except Exception as e:
+        return FloorPlanAnalyzeResponse(
+            analysis_text=(
+                "Floor plan AI model error. Please verify the model is available "
+                f"on Hugging Face ({FLOORPLAN_VLM_MODEL}) and try again. Error: {e}"
+            )
+        )
+
+    # result can be a list of dicts or a dict depending on the model
+    if isinstance(result, list) and result:
+        caption = (
+            result[0].get("generated_text")
+            or result[0].get("summary_text")
+            or str(result[0])
+        )
+    elif isinstance(result, dict):
+        caption = (
+            result.get("generated_text")
+            or result.get("summary_text")
+            or str(result)
+        )
+    else:
+        caption = str(result)
+
+    analysis = f"AI Floor Plan Interpretation: {caption}"
+    if req.notes:
+        analysis += f"\n\nAdditional user notes: {req.notes}"
+
+    return FloorPlanAnalyzeResponse(analysis_text=analysis)
