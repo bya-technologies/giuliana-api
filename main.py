@@ -38,6 +38,11 @@ ADV_DRAFTING_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
 # Embedding model placeholder (for future case law search)
 EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
 
+# Real estate specific models
+REAL_ESTATE_LISTING_MODEL = "interneuronai/real_estate_listing_analysis_bart"
+# (future) floor plan vision model – to be wired later
+FLOORPLAN_VLM_MODEL = "sabaridsnfuji/FloorPlanVisionAIAdaptor"
+
 # Default label sets
 DEFAULT_CONTRACT_LABELS = [
     "Lease Agreement",
@@ -306,6 +311,29 @@ class OCRPdfRequest(BaseModel):
 class OCRPdfResponse(BaseModel):
     text: str
     num_pages: Optional[int] = None
+
+
+# --- Real Estate Listing Analysis ---
+
+class RealEstateListingRequest(BaseModel):
+    text: str  # raw listing or property description text
+
+
+class RealEstateListingResponse(BaseModel):
+    label: str           # predicted category / property type
+    score: float         # confidence score
+    raw: List[dict]      # full raw output from the model
+
+
+# --- Real Estate Floor Plan Analysis (stub) ---
+
+class FloorPlanAnalyzeRequest(BaseModel):
+    file_url: str           # URL to the floor plan image (S3, GDrive, etc.)
+    notes: Optional[str] = None  # optional textual notes or description
+
+
+class FloorPlanAnalyzeResponse(BaseModel):
+    analysis_text: str      # human-readable analysis / placeholder
 
 
 # ------------------------------
@@ -849,3 +877,55 @@ def ocr_pdf(req: OCRPdfRequest):
         f"{req.file_url}"
     )
     return OCRPdfResponse(text=demo_text, num_pages=None)
+
+
+# 2️⃣0️⃣ Real Estate Listing Analysis
+@app.post("/realestate/listing-analyze", response_model=RealEstateListingResponse)
+def real_estate_listing_analyze(req: RealEstateListingRequest):
+    """
+    Analyze real estate listing or property description text.
+    Uses a BART-based classifier to categorize the listing and surface its type.
+    Example use cases:
+    - Classify as apartment / office / retail / new building / etc.
+    - Pre-screen listings for brokers, investors, or legal review.
+    """
+
+    response = client.text_classification(
+        req.text,
+        model=REAL_ESTATE_LISTING_MODEL,
+    )
+
+    # Hugging Face usually returns a list of {"label": "...", "score": float}
+    if isinstance(response, list) and len(response) > 0:
+        best = max(response, key=lambda x: x.get("score", 0.0))
+    else:
+        # fallback in case of unexpected format
+        best = {"label": "UNKNOWN", "score": 0.0}
+
+    return RealEstateListingResponse(
+        label=best.get("label", "UNKNOWN"),
+        score=float(best.get("score", 0.0)),
+        raw=response if isinstance(response, list) else [best],
+    )
+
+
+# 2️⃣1️⃣ Real Estate Floor Plan Analysis (stub / future vision integration)
+@app.post("/realestate/floorplan-analyze", response_model=FloorPlanAnalyzeResponse)
+def floorplan_analyze(req: FloorPlanAnalyzeRequest):
+    """
+    Placeholder endpoint for floor plan analysis.
+    In the next phase, this can be connected to a vision-language model
+    (e.g., FloorPlanVisionAIAdaptor) to extract layout, room counts, etc.
+
+    For now, it simply echoes a structured message that can be shown in the UI.
+    """
+
+    base_msg = (
+        f"Floor plan analysis is in preview. Received file URL: {req.file_url}."
+        " In the next release, this endpoint will extract layout details such as"
+        " room count, approximate area, and key features using a vision model."
+    )
+    if req.notes:
+        base_msg += f" Notes provided by user: {req.notes}"
+
+    return FloorPlanAnalyzeResponse(analysis_text=base_msg)
